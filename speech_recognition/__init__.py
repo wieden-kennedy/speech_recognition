@@ -11,6 +11,7 @@ import collections, threading
 import platform, stat
 import json, hashlib, hmac, time, base64, random, uuid
 import tempfile, shutil
+from google.cloud import speech
 
 try: # attempt to use the Python 2 modules
     from urllib import urlencode
@@ -19,6 +20,15 @@ except ImportError: # use the Python 3 modules
     from urllib.parse import urlencode
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
+
+# [START import_libraries]
+import argparse
+import base64
+import json
+from googleapiclient import discovery
+import httplib2
+from oauth2client.client import GoogleCredentials
+# [END import_libraries]
 
 # define exceptions
 class WaitTimeoutError(Exception): pass
@@ -199,7 +209,7 @@ class AudioFile(AudioSource):
                 try:
                     self.audio_reader = aifc.open(aiff_file, "rb")
                 except aifc.Error:
-                    raise ValueError("Audio file could not be read as PCM WAV, AIFF/AIFF-C, or Native FLAC; check if file is corrupted or in another format")
+                    assert False, "Audio file could not be read as WAV, AIFF, or FLAC; check if file is corrupted"
                 self.little_endian = False # AIFF is a big-endian format
         assert 1 <= self.audio_reader.getnchannels() <= 2, "Audio must be mono or stereo"
         self.SAMPLE_WIDTH = self.audio_reader.getsampwidth()
@@ -250,17 +260,6 @@ class AudioFile(AudioSource):
             return buffer
 
 class AudioData(object):
-    """
-    Creates a new ``AudioData`` instance, which represents mono audio data.
-
-    The raw audio data is specified by ``frame_data``, which is a sequence of bytes representing audio samples. This is the frame data structure used by the PCM WAV format.
-
-    The width of each sample, in bytes, is specified by ``sample_width``. Each group of ``sample_width`` bytes represents a single audio sample.
-
-    The audio data is assumed to have a sample rate of ``sample_rate`` samples per second (Hertz).
-
-    Usually, instances of this class are obtained from ``recognizer_instance.record`` or ``recognizer_instance.listen``, or in the callback for ``recognizer_instance.listen_in_background``, rather than instantiating them directly.
-    """
     def __init__(self, frame_data, sample_rate, sample_width):
         assert sample_rate > 0, "Sample rate must be a positive integer"
         assert sample_width % 1 == 0 and 1 <= sample_width <= 4, "Sample width must be between 1 and 4 inclusive"
@@ -408,8 +407,6 @@ class Recognizer(AudioSource):
         self.dynamic_energy_adjustment_damping = 0.15
         self.dynamic_energy_ratio = 1.5
         self.pause_threshold = 0.8 # seconds of non-speaking audio before a phrase is considered complete
-        self.operation_timeout = None # seconds after an internal operation (e.g., an API request) starts before it times out, or ``None`` for no timeout
-
         self.phrase_threshold = 0.3 # minimum seconds of speaking audio before we consider the speaking audio a phrase - values below this are ignored (for filtering out clicks and pops)
         self.non_speaking_duration = 0.5 # seconds of non-speaking audio to keep on both sides of the recording
 
@@ -473,26 +470,22 @@ class Recognizer(AudioSource):
             target_energy = energy * self.dynamic_energy_ratio
             self.energy_threshold = self.energy_threshold * damping + target_energy * (1 - damping)
 
-    def listen(self, source, timeout = None, phrase_time_limit = None):
+    def listen(self, source, timeout = None):
         """
         Records a single phrase from ``source`` (an ``AudioSource`` instance) into an ``AudioData`` instance, which it returns.
 
         This is done by waiting until the audio has an energy above ``recognizer_instance.energy_threshold`` (the user has started speaking), and then recording until it encounters ``recognizer_instance.pause_threshold`` seconds of non-speaking or there is no more audio input. The ending silence is not included.
 
-        The ``timeout`` parameter is the maximum number of seconds that this will wait for a phrase to start before giving up and throwing an ``speech_recognition.WaitTimeoutError`` exception. If ``timeout`` is ``None``, there will be no wait timeout.
-
-        The ``phrase_time_limit`` parameter is the maximum number of seconds that this will allow a phrase to continue before stopping and returning the part of the phrase processed before the time limit was reached. The resulting audio will be the phrase cut off at the time limit. If ``phrase_timeout`` is ``None``, there will be no phrase time limit.
-
-        This operation will always complete within ``timeout + phrase_timeout`` seconds if both are numbers, either by returning the audio data, or by raising an exception.
+        The ``timeout`` parameter is the maximum number of seconds that it will wait for a phrase to start before giving up and throwing an ``speech_recognition.WaitTimeoutError`` exception. If ``timeout`` is ``None``, it will wait indefinitely.
         """
         assert isinstance(source, AudioSource), "Source must be an audio source"
         assert source.stream is not None, "Audio source must be entered before listening, see documentation for `AudioSource`; are you using `source` outside of a `with` statement?"
         assert self.pause_threshold >= self.non_speaking_duration >= 0
 
         seconds_per_buffer = (source.CHUNK + 0.0) / source.SAMPLE_RATE
-        pause_buffer_count = int(math.ceil(self.pause_threshold / seconds_per_buffer)) # number of buffers of non-speaking audio during a phrase, before the phrase should be considered complete
+        pause_buffer_count = int(math.ceil(self.pause_threshold / seconds_per_buffer)) # number of buffers of non-speaking audio before the phrase is complete
         phrase_buffer_count = int(math.ceil(self.phrase_threshold / seconds_per_buffer)) # minimum number of buffers of speaking audio before we consider the speaking audio a phrase
-        non_speaking_buffer_count = int(math.ceil(self.non_speaking_duration / seconds_per_buffer)) # maximum number of buffers of non-speaking audio to retain before and after a phrase
+        non_speaking_buffer_count = int(math.ceil(self.non_speaking_duration / seconds_per_buffer)) # maximum number of buffers of non-speaking audio to retain before and after
 
         # read audio input for phrases until there is a phrase that is long enough
         elapsed_time = 0 # number of seconds of audio read
@@ -501,11 +494,11 @@ class Recognizer(AudioSource):
             frames = collections.deque()
 
             # store audio input until the phrase starts
+
             while True:
-                # handle waiting too long for phrase by raising an exception
                 elapsed_time += seconds_per_buffer
-                if timeout and elapsed_time > timeout:
-                    raise WaitTimeoutError("listening timed out while waiting for phrase to start")
+                if timeout and elapsed_time > timeout: # handle timeout if specified
+                    raise WaitTimeoutError("listening timed out")
 
                 buffer = source.stream.read(source.CHUNK)
                 if len(buffer) == 0: break # reached end of the stream
@@ -525,12 +518,8 @@ class Recognizer(AudioSource):
 
             # read audio input until the phrase ends
             pause_count, phrase_count = 0, 0
-            phrase_start_time = elapsed_time
             while True:
-                # handle phrase being too long by cutting off the audio
                 elapsed_time += seconds_per_buffer
-                if phrase_time_limit and elapsed_time - phrase_start_time > phrase_time_limit:
-                    break
 
                 buffer = source.stream.read(source.CHUNK)
                 if len(buffer) == 0: break # reached end of the stream
@@ -538,7 +527,7 @@ class Recognizer(AudioSource):
                 phrase_count += 1
 
                 # check if speaking has stopped for longer than the pause threshold on the audio input
-                energy = audioop.rms(buffer, source.SAMPLE_WIDTH) # unit energy of the audio signal within the buffer
+                energy = audioop.rms(buffer, source.SAMPLE_WIDTH) # energy of the audio signal
                 if energy > self.energy_threshold:
                     pause_count = 0
                 else:
@@ -556,13 +545,13 @@ class Recognizer(AudioSource):
 
         return AudioData(frame_data, source.SAMPLE_RATE, source.SAMPLE_WIDTH)
 
-    def listen_in_background(self, source, callback, phrase_time_limit = None):
+    def listen_in_background(self, source, callback):
         """
         Spawns a thread to repeatedly record phrases from ``source`` (an ``AudioSource`` instance) into an ``AudioData`` instance and call ``callback`` with that ``AudioData`` instance as soon as each phrase are detected.
 
         Returns a function object that, when called, requests that the background listener thread stop, and waits until it does before returning. The background thread is a daemon and will not stop the program from exiting if there are no other non-daemon threads.
 
-        Phrase recognition uses the exact same mechanism as ``recognizer_instance.listen(source)``. The ``phrase_time_limit`` parameter works in the same way as the ``phrase_time_limit`` parameter for ``recognizer_instance.listen(source)``, as well.
+        Phrase recognition uses the exact same mechanism as ``recognizer_instance.listen(source)``.
 
         The ``callback`` parameter is a function that should accept two parameters - the ``recognizer_instance``, and an ``AudioData`` instance representing the captured audio. Note that ``callback`` function will be called from a non-main thread.
         """
@@ -658,7 +647,54 @@ class Recognizer(AudioSource):
         if hypothesis is not None: return hypothesis.hypstr
         raise UnknownValueError() # no transcriptions available
 
-    def recognize_google(self, audio_data, key = None, language = "en-US", show_all = False):
+    def recognize_google(self, audio_data, encoding ="FLAC", language = "en-US"):
+        recognize_google_cloud_api(audio_data,encoding,language)
+    # [START authenticating]
+    DISCOVERY_URL = ('https://{api}.googleapis.com/$discovery/rest?'
+                 'version={apiVersion}')
+
+    def get_speech_service():
+        credentials = GoogleCredentials.get_application_default().create_scoped(
+            ['https://www.googleapis.com/auth/cloud-platform'])
+        http = httplib2.Http()
+        credentials.authorize(http)
+
+        return discovery.build(
+            'speech', 'v1beta1', http=http, discoveryServiceUrl=DISCOVERY_URL)
+
+    def recognize_google_cloud_api(self, audio_data, encoding ="FLAC", language = "en-US"):
+        """
+        """
+        assert isinstance(audio_data, AudioData), "`audio_data` must be audio data"
+        assert isinstance(language, str), "`language` must be a string"
+
+        flac_data = audio_data.get_flac_data(
+            convert_rate = None if audio_data.sample_rate >= 16000 else 16000, # audio samples must be at least 16 kHz
+            convert_width = 2 # audio samples must be 16-bit
+        )
+
+        service = get_speech_service()
+        service_request = service.speech().syncrecognize(
+            body={
+                'config': {
+                    'encoding': 'LINEAR16',
+                    'sampleRate': 16000,  
+                    'languageCode': 'en-US', 
+                },
+                'audio': {
+                    'content': speech_content.decode('UTF-8')
+                    }
+                })
+        #request = Request(url, data = flac_data, headers = {"Content-Type": "audio/x-flac; rate={0}".format(audio_data.sample_rate)})
+
+        # obtain audio transcription results
+        try:
+            response = service_request.execute()
+            json_result = json.dumps(response)
+            print(json_result)
+        return json_result
+
+    def recognize_google_speech_api(self, audio_data, key = None, language = "en-US", show_all = False):
         """
         Performs speech recognition on ``audio_data`` (an ``AudioData`` instance), using the Google Speech Recognition API.
 
@@ -681,6 +717,7 @@ class Recognizer(AudioSource):
             convert_width = 2 # audio samples must be 16-bit
         )
         if key is None: key = "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
+        # "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw" 
         url = "http://www.google.com/speech-api/v2/recognize?{0}".format(urlencode({
             "client": "chromium",
             "lang": language,
@@ -690,7 +727,7 @@ class Recognizer(AudioSource):
 
         # obtain audio transcription results
         try:
-            response = urlopen(request, timeout=self.operation_timeout)
+            response = urlopen(request)
         except HTTPError as e:
             raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
         except URLError as e:
@@ -738,7 +775,7 @@ class Recognizer(AudioSource):
         url = "https://api.wit.ai/speech?v=20160526"
         request = Request(url, data = wav_data, headers = {"Authorization": "Bearer {0}".format(key), "Content-Type": "audio/wav"})
         try:
-            response = urlopen(request, timeout=self.operation_timeout)
+            response = urlopen(request)
         except HTTPError as e:
             raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
         except URLError as e:
@@ -791,7 +828,7 @@ class Recognizer(AudioSource):
             if allow_caching:
                 start_time = monotonic()
             try:
-                credential_response = urlopen(credential_request, timeout=self.operation_timeout)
+                credential_response = urlopen(credential_request)
             except HTTPError as e:
                 raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
             except URLError as e:
@@ -825,7 +862,7 @@ class Recognizer(AudioSource):
             "Content-Type": "audio/wav; samplerate=16000; sourcerate={0}; trustsourcerate=true".format(audio_data.sample_rate),
         })
         try:
-            response = urlopen(request, timeout=self.operation_timeout)
+            response = urlopen(request)
         except HTTPError as e:
             raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
         except URLError as e:
@@ -888,7 +925,7 @@ class Recognizer(AudioSource):
             "Content-Type": "multipart/form-data; boundary={0}".format(boundary)
         })
         try:
-            response = urlopen(request, timeout=self.operation_timeout)
+            response = urlopen(request)
         except HTTPError as e:
             raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
         except URLError as e:
@@ -898,7 +935,7 @@ class Recognizer(AudioSource):
 
         # return results
         if show_all: return result
-        if "status" not in result or "errorType" not in result["status"] or result["status"]["errorType"] != "success":
+        if "asr" not in result or result["asr"] is None:
             raise UnknownValueError()
         return result["result"]["resolvedQuery"]
 
@@ -941,7 +978,7 @@ class Recognizer(AudioSource):
             "Hound-Client-Authentication": "{0};{1};{2}".format(client_id, request_time, request_signature)
         })
         try:
-            response = urlopen(request, timeout=self.operation_timeout)
+            response = urlopen(request)
         except HTTPError as e:
             raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
         except URLError as e:
@@ -991,7 +1028,7 @@ class Recognizer(AudioSource):
             authorization_value = base64.standard_b64encode("{0}:{1}".format(username, password))
         request.add_header("Authorization", "Basic {0}".format(authorization_value))
         try:
-            response = urlopen(request, timeout=self.operation_timeout)
+            response = urlopen(request)
         except HTTPError as e:
             raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
         except URLError as e:
