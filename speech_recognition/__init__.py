@@ -11,7 +11,6 @@ import collections, threading
 import platform, stat
 import json, hashlib, hmac, time, base64, random, uuid
 import tempfile, shutil
-from google.cloud import speech
 
 try: # attempt to use the Python 2 modules
     from urllib import urlencode
@@ -20,15 +19,6 @@ except ImportError: # use the Python 3 modules
     from urllib.parse import urlencode
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
-
-# [START import_libraries]
-import argparse
-import base64
-import json
-from googleapiclient import discovery
-import httplib2
-from oauth2client.client import GoogleCredentials
-# [END import_libraries]
 
 # define exceptions
 class WaitTimeoutError(Exception): pass
@@ -647,54 +637,7 @@ class Recognizer(AudioSource):
         if hypothesis is not None: return hypothesis.hypstr
         raise UnknownValueError() # no transcriptions available
 
-    def recognize_google(self, audio_data, encoding ="FLAC", language = "en-US"):
-        recognize_google_cloud_api(audio_data,encoding,language)
-    # [START authenticating]
-    DISCOVERY_URL = ('https://{api}.googleapis.com/$discovery/rest?'
-                 'version={apiVersion}')
-
-    def get_speech_service():
-        credentials = GoogleCredentials.get_application_default().create_scoped(
-            ['https://www.googleapis.com/auth/cloud-platform'])
-        http = httplib2.Http()
-        credentials.authorize(http)
-
-        return discovery.build(
-            'speech', 'v1beta1', http=http, discoveryServiceUrl=DISCOVERY_URL)
-
-    def recognize_google_cloud_api(self, audio_data, encoding ="FLAC", language = "en-US"):
-        """
-        """
-        assert isinstance(audio_data, AudioData), "`audio_data` must be audio data"
-        assert isinstance(language, str), "`language` must be a string"
-
-        flac_data = audio_data.get_flac_data(
-            convert_rate = None if audio_data.sample_rate >= 16000 else 16000, # audio samples must be at least 16 kHz
-            convert_width = 2 # audio samples must be 16-bit
-        )
-
-        service = get_speech_service()
-        service_request = service.speech().syncrecognize(
-            body={
-                'config': {
-                    'encoding': 'FLAC',
-                    'sampleRate': 16000,  
-                    'languageCode': 'en-US', 
-                },
-                'audio': {
-                    'content': flac_data
-                    }
-                })
-        #request = Request(url, data = flac_data, headers = {"Content-Type": "audio/x-flac; rate={0}".format(audio_data.sample_rate)})
-
-        # obtain audio transcription results
-        try:
-            response = service_request.execute()
-            json_result = json.dumps(response)
-            print(json_result)
-            return json_result
-
-    def recognize_google_speech_api(self, audio_data, key = None, language = "en-US", show_all = False):
+    def recognize_google(self, audio_data, key = None, language = "en-US", show_all = False):
         """
         Performs speech recognition on ``audio_data`` (an ``AudioData`` instance), using the Google Speech Recognition API.
 
@@ -717,7 +660,6 @@ class Recognizer(AudioSource):
             convert_width = 2 # audio samples must be 16-bit
         )
         if key is None: key = "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
-        # "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw" 
         url = "http://www.google.com/speech-api/v2/recognize?{0}".format(urlencode({
             "client": "chromium",
             "lang": language,
