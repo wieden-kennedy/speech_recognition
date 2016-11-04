@@ -11,6 +11,17 @@ import collections, threading
 import platform, stat
 import json, hashlib, hmac, time, base64, random, uuid
 import tempfile, shutil
+# [START import_libraries]
+import argparse
+import base64
+import json
+from googleapiclient import discovery
+import httplib2
+from oauth2client.client import GoogleCredentials
+# [START authenticating]
+DISCOVERY_URL = ('https://{api}.googleapis.com/$discovery/rest?'
+                 'version={apiVersion}')
+# [END import_libraries]
 
 try: # attempt to use the Python 2 modules
     from urllib import urlencode
@@ -635,6 +646,63 @@ class Recognizer(AudioSource):
         # return results
         hypothesis = decoder.hyp()
         if hypothesis is not None: return hypothesis.hypstr
+        raise UnknownValueError() # no transcriptions available
+
+
+    # GOOGLE_APPLICATION_CREDENTIALS
+    def get_speech_service(self):
+        credentials = GoogleCredentials.get_application_default().create_scoped(
+            ['https://www.googleapis.com/auth/cloud-platform'])
+        http = httplib2.Http()
+        credentials.authorize(http)
+
+        return discovery.build(
+            'speech', 'v1beta1', http=http, discoveryServiceUrl=DISCOVERY_URL)
+    # [END authenticating]
+
+    def google_cloud_recognition(self,audio_data):
+        speech_content = base64.b64encode(audio_data)
+        service = self.get_speech_service()
+        service_request = service.speech().syncrecognize(
+            body={
+                'config': {
+                    'encoding': 'LINEAR16', 
+                    'sampleRate': 16000,  # 16 khz
+                    'languageCode': 'en-US',  # a BCP-47 language tag
+                },
+                'audio': {
+                    'content': speech_content.decode('UTF-8')
+                    }
+                })
+        
+        if response:
+            script = response['results'][0]['alternatives'][0]['transcript']
+            return script
+
+        # obtain audio transcription results
+        try:
+            response = service_request.execute()
+        except HTTPError as e:
+            raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
+        except URLError as e:
+            raise RequestError("recognition connection failed: {0}".format(e.reason))
+        #script = response['results'][0]['alternatives'][0]['transcript']
+        response_text = response.read().decode("utf-8")
+
+        # ignore any blank blocks
+        actual_result = []
+        for line in response_text.split("\n"):
+            if not line: continue
+            result = json.loads(line)["results"]
+            if len(result) != 0:
+                actual_result = result[0]
+                break
+
+        # return results
+        if "alternatives" not in actual_result: raise UnknownValueError()
+        for entry in actual_result["alternatives"]:
+            if "transcript" in entry:
+                return entry["transcript"]
         raise UnknownValueError() # no transcriptions available
 
     def recognize_google(self, audio_data, key = None, language = "en-US", show_all = False):
