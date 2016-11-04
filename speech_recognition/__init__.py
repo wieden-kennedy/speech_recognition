@@ -675,19 +675,13 @@ class Recognizer(AudioSource):
                     }
                 })
         
-        if response:
-            script = response['results'][0]['alternatives'][0]['transcript']
-            return script
-
-        # obtain audio transcription results
         try:
             response = service_request.execute()
         except HTTPError as e:
             raise RequestError("recognition request failed: {0}".format(getattr(e, "reason", "status {0}".format(e.code)))) # use getattr to be compatible with Python 2.6
         except URLError as e:
             raise RequestError("recognition connection failed: {0}".format(e.reason))
-        #script = response['results'][0]['alternatives'][0]['transcript']
-        response_text = response.read().decode("utf-8")
+        response_text = json.dumps(response)
 
         # ignore any blank blocks
         actual_result = []
