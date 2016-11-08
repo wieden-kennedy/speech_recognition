@@ -685,12 +685,13 @@ class Recognizer(AudioSource):
 
         # ignore any blank blocks
         actual_result = []
-        for line in response_text.split("\n"):
-            if not line: continue
-            result = json.loads(line)["results"]
-            if len(result) != 0:
-                actual_result = result[0]
-                break
+        if "results" in response_text:
+            for line in response_text.split("\n"):
+                if not line: continue
+                result = json.loads(line)["results"]
+                if len(result) != 0:
+                    actual_result = result[0]
+                    break
 
         # return results
         if "alternatives" not in actual_result: raise UnknownValueError()
