@@ -64,7 +64,7 @@ class Microphone(AudioSource):
 
     Higher ``chunk_size`` values help avoid triggering on rapidly changing ambient noise, but also makes detection less sensitive. This value, generally, should be left at its default.
     """
-    def __init__(self, device_index = None, sample_rate = 8000, chunk_size = 1024):
+    def __init__(self, device_index = None, sample_rate = 16000, chunk_size = 1024):
         # set up PyAudio
         self.pyaudio_module = self.get_pyaudio()
 
@@ -553,7 +553,6 @@ class Recognizer(AudioSource):
             pause_count, phrase_count = 0, 0
             phrase_start_time = elapsed_time
             while True:
-                print("reading audio input...")
                 # handle phrase being too long by cutting off the audio
                 elapsed_time += seconds_per_buffer
                 if phrase_time_limit and elapsed_time - phrase_start_time > phrase_time_limit:
@@ -617,7 +616,6 @@ class Recognizer(AudioSource):
             # store audio input until the phrase starts
 
             while True:
-                print("wait for audio input...")
                 # handle waiting too long for phrase by raising an exception
                 elapsed_time += seconds_per_buffer
                 if timeout and elapsed_time > timeout:
