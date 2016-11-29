@@ -641,7 +641,6 @@ class Recognizer(AudioSource):
             pause_count, phrase_count = 0, 0
             phrase_start_time = elapsed_time
             while True:
-                print("reading audio input...")
                 # handle phrase being too long by cutting off the audio
                 elapsed_time += seconds_per_buffer
                 if phrase_time_limit and elapsed_time - phrase_start_time > phrase_time_limit:
