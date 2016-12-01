@@ -412,17 +412,17 @@ class AudioData(object):
         return flac_data
 
 class Recognizer(AudioSource):
-    def __init__(self):
+    def __init__(self, params={}):
         """
         Creates a new ``Recognizer`` instance, which represents a collection of speech recognition functionality.
         """
-        self.energy_threshold = 300 # minimum audio energy to consider for recording
-        self.dynamic_energy_threshold = True
-        self.dynamic_energy_adjustment_damping = 0.15
-        self.dynamic_energy_ratio = 1.5
-        self.pause_threshold = 0.8 # seconds of non-speaking audio before a phrase is considered complete
-        self.phrase_threshold = 0.3 # minimum seconds of speaking audio before we consider the speaking audio a phrase - values below this are ignored (for filtering out clicks and pops)
-        self.non_speaking_duration = 0.5 # seconds of non-speaking audio to keep on both sides of the recording
+        self.energy_threshold = params.get('energy_threshold', 400) # minimum audio energy to consider for recording
+        self.dynamic_energy_threshold = params.get('dynamic_energy_threshold', True)
+        self.dynamic_energy_adjustment_damping = params.get('dynamic_energy_adjustment_damping', 0.15)
+        self.dynamic_energy_ratio = params.get('dynamic_energy_ratio', 3)
+        self.pause_threshold = params.get('pause_threshold', 0.25) # seconds of non-speaking audio before a phrase is considered complete
+        self.phrase_threshold = params.get('phrase_threshold', 0.4) # minimum seconds of speaking audio before we consider the speaking audio a phrase - values below this are ignored (for filtering out clicks and pops)
+        self.non_speaking_duration = params.get('non_speaking_duration', 0.25) # seconds of non-speaking audio to keep on both sides of the recording
         self.operation_timeout = None # seconds after an internal operation (e.g., an API request) starts before it times out, or ``None`` for no timeout
         
     def record(self, source, duration = None, offset = None):
@@ -456,6 +456,9 @@ class Recognizer(AudioSource):
 
         frame_data = frames.getvalue()
         frames.close()
+
+        if last_energy <= 14:
+            return None
         return AudioData(frame_data, source.SAMPLE_RATE, source.SAMPLE_WIDTH)
 
     def adjust_for_ambient_noise(self, source, duration = 1):
@@ -549,6 +552,7 @@ class Recognizer(AudioSource):
                     target_energy = energy * self.dynamic_energy_ratio
                     self.energy_threshold = self.energy_threshold * damping + target_energy * (1 - damping)
 
+
             # read audio input until the phrase ends
             pause_count, phrase_count = 0, 0
             phrase_start_time = elapsed_time
@@ -610,6 +614,8 @@ class Recognizer(AudioSource):
         # read audio input for phrases until there is a phrase that is long enough
         elapsed_time = 0 # number of seconds of audio read
         buffer = b"" # an empty buffer means that the stream has ended and there is no data left to read
+        last_energy = 0
+        
         while True:
             frames = collections.deque()
 
@@ -629,14 +635,17 @@ class Recognizer(AudioSource):
 
                 # detect whether speaking has started on audio input
                 energy = audioop.rms(buffer, source.SAMPLE_WIDTH) # energy of the audio signal
+
+                if energy > last_energy:
+                    last_energy = energy
                 if energy > self.energy_threshold: break
 
                 # dynamically adjust the energy threshold using assymmetric weighted average
                 if self.dynamic_energy_threshold:
                     damping = self.dynamic_energy_adjustment_damping ** seconds_per_buffer # account for different chunk sizes and rates
                     target_energy = energy * self.dynamic_energy_ratio
-                    self.energy_threshold = self.energy_threshold * damping + target_energy * (1 - damping)
-
+                    self.energy_threshold = self.energy_threshold * damping + target_energy * (1 - damping)                    
+                
             # read audio input until the phrase ends
             pause_count, phrase_count = 0, 0
             phrase_start_time = elapsed_time
@@ -653,6 +662,9 @@ class Recognizer(AudioSource):
 
                 # check if speaking has stopped for longer than the pause threshold on the audio input
                 energy = audioop.rms(buffer, source.SAMPLE_WIDTH) # unit energy of the audio signal within the buffer
+
+                if energy > last_energy:
+                    last_energy = energy
                 if energy > self.energy_threshold:
                     pause_count = 0
                 else:
@@ -664,6 +676,10 @@ class Recognizer(AudioSource):
             phrase_count -= pause_count # exclude the buffers for the pause before the phrase
             if phrase_count >= phrase_buffer_count or len(buffer) == 0: break # phrase is long enough or we've reached the end of the stream, so stop listening
 
+
+        print elapsed_time
+        print self.energy_threshold
+        print "energy_max: %s" % last_energy
         # obtain frame data
         for i in range(pause_count - non_speaking_buffer_count): frames.pop() # remove extra non-speaking frames at the end
         frame_data = b"".join(list(frames))
@@ -955,7 +971,7 @@ class Recognizer(AudioSource):
                 self.bing_cached_access_token_expiry = start_time + 600 # according to https://www.microsoft.com/cognitive-services/en-us/Speech-api/documentation/API-Reference-REST/BingVoiceRecognition, the token expires in exactly 10 minutes
 
         wav_data = audio_data.get_wav_data(
-            convert_rate = 16000, # audio samples must be 8kHz or 16 kHz
+            convert_rate = 8000, # audio samples must be 8kHz or 16 kHz
             convert_width = 2 # audio samples should be 16-bit
         )
 
@@ -984,8 +1000,10 @@ class Recognizer(AudioSource):
         response_text = response.read().decode("utf-8")
         result = json.loads(response_text)
 
+        print result
         # return results
         if show_all: return result
+    
         if "header" not in result or "lexical" not in result["header"]: raise UnknownValueError()
         return result["header"]["lexical"]
 
