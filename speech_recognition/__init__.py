@@ -802,6 +802,7 @@ class Recognizer(AudioSource):
 
     def google_cloud_recognition(self,audio_data,service):
         speech_content = base64.b64encode(audio_data)
+        service = self.get_speech_service()
         service_request = service.speech().syncrecognize(
             body={
                 'config': {
@@ -956,7 +957,6 @@ class Recognizer(AudioSource):
 
             if allow_caching:
                 start_time = monotonic()
-
             try:
                 credential_response = urlopen(credential_request, timeout=self.operation_timeout)
             except HTTPError as e:
