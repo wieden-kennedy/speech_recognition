@@ -806,7 +806,7 @@ class Recognizer(AudioSource):
             body={
                 'config': {
                     'encoding': 'FLAC', 
-                    'sampleRate': 16000,  # 16 khz
+                    'sampleRate': 44100,  # 16 khz
                     'languageCode': 'en-US',  # a BCP-47 language tag
                 },
                 'audio': {
